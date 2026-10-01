@@ -1,35 +1,41 @@
 import express from "express";
-import pg from "pg";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-const { Pool } = pg;
 
-const pool = new Pool({
-  connectionString: process.env.PROD_SUPABASE_DB_URI,
-  ssl: { rejectUnauthorized: false }
-});
+// Production Supabase is IP-allowlisted to the Cruise Globe Dashboard's static IPs,
+// so this app no longer connects to the database. It asks the dashboard's gateway
+// for the number instead, and holds no database credentials.
+const GATEWAY_URL = (process.env.CRUISE_GATEWAY_URL || "").replace(/\/+$/, "");
+const TOKEN = process.env.GATEWAY_TOKEN_SMIIRL;
 
 app.get("/user-count", async (req, res) => {
+  if (!GATEWAY_URL || !TOKEN) {
+    console.error("Gateway not configured: set CRUISE_GATEWAY_URL and GATEWAY_TOKEN_SMIIRL");
+    return res.status(500).json({ error: "Failed to fetch user count" });
+  }
+
   try {
-    const result = await pool.query(
-      `SELECT cumulative_active_users 
-       FROM private.active_user_growth_tracker 
-       ORDER BY day DESC 
-       LIMIT 1`
-    );
+    const r = await fetch(`${GATEWAY_URL}/api/gateway/smiirl/user-count`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await r.json().catch(() => null);
+    const value = Number(body?.value);
 
-    const count = result.rows[0].cumulative_active_users;
+    if (!r.ok || body?.ok !== true || !Number.isFinite(value)) {
+      throw new Error(`gateway ${r.status} ${body?.error ?? "unexpected response"}`);
+    }
 
-    res.json({ value: count });
+    res.json({ value });
   } catch (error) {
-    console.error("Database error:", error);
+    console.error("Gateway error:", error.message);
     res.status(500).json({ error: "Failed to fetch user count" });
   }
 });
 
 app.listen(3000, () => {
-  console.log("✅ Server running on http://localhost:3000/user-count");
+  console.log("Server running on http://localhost:3000/user-count");
 });
